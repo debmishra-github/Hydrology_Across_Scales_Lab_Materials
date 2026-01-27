@@ -1,0 +1,361 @@
+---
+title: "Lab 1 (BAEN 675) : Upscaling ground measurements of Precipitation"
+output: html_notebook
+---
+
+This notebook will go through major steps in performing upscaling for precipitation measurements at point scale.
+
+For performing the analysis, we will use daily precipitation data from the Riesel experimental watershed in Texas. The Riesel watersheds represent one of the longest active hydrologic research sites in the US. 
+It contains 340 ha of federally owned and operated land and was established in 1937.  The still-active site was established in the 2372 ha Brushy Creek watershed near Riesel, Texas, because of its central location in the 4.45 million ha Texas Blackland Prairie.  Present day agricultural land use in this productive region consists of cattle production on pasture and rangeland, and corn, wheat, grain sorghum, and oat production under a wide range of tillage and management operations. Long, hot summers and short, mild winters characterize the climate.  A majority of the annual precipitation (~ 890 mm) occurs with the passage of Canadian continental and Pacific maritime fronts, but convective thunderstorms and occasional hurricanes can contribute intense rainfall.
+
+More information about the site can be accessed at: https://www.nrrig.mwa.ars.usda.gov/STEWARDS_HTML/Riesel%20Watershed%20TX.htm
+
+### Part 1: Working with time series data
+
+We will confine our analysis to daily data of precipitation which is available at: https://www.ars.usda.gov/plains-area/temple-tx/grassland-soil-and-water-research-laboratory/docs/riesel-daily-rainfall-records-in-inches/
+
+Second important data we need would be Thiessen weights which will required to upscale the point-scale precipitation measurements. These are available at: 
+https://www.ars.usda.gov/plains-area/temple-tx/grassland-soil-and-water-research-laboratory/docs/riesel-thiessen-weights/
+
+As this our first lab assignment, we will make it even simpler by just focusing a single subwatershed (denoted by letter "Y"). 
+
+A summary of different combination of Thiessen weights used in the past for the subwatershed Y can be found here: https://www.ars.usda.gov/ARSUserFiles/30980000/riesel/weights/wt-y.xls
+
+We will just be using the weights that's relevant for the period of our interest (mostly after the year 2010). When we download the Thiessen weights summary excel sheet, we also realize that there are 7 rain gauge stations which are of interest to us. These are denoted as: "rg69",	"rg69b",	"rg70",	"rg75a",	"rg84a",	"rg89",	"rgw3".
+(Last checked on: 1/27/2026)
+
+Therefore, we will need daily precipitation data only for these rain gauge stations. Note that these sites typically have tipping bucket rain gauges installed and connected to a Campbell Scientific CR10x
+datalogger to collect precipitation data (contiuous operation since 1939)
+It is to be noted here that the five column headers for each of these datasets are as follows: Rain Gauge Station, Month, Day, Year, Rainfall(in inches).
+
+Now, we can either download the data to our local computer, or directly read them from the website. Let's go with the latter option. Let's look at an example of it first.
+
+```{r}
+# Read a CSV file directly from a URL
+url_csv <- "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/RG69.TXT"
+
+data <- read.table(
+  url_csv,
+  header = FALSE,
+  sep = "",
+  col.names = c("Station", "Month", "Day", "Year", "Precip_in")
+)
+
+# View the first few rows
+head(data)
+
+```
+We can now generalize the above code to read and combine all the rain gauge precipitation data.
+
+```{r}
+
+#Step 1: Define stations and URLs
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+stations <- c("rg69", "rg69b", "rg70", "rg75a", "rg84a", "rg89", "rgw3")
+
+urls <- c(
+  rg69  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/RG69.TXT",
+  rg69b = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg69b.txt",
+  rg70  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg70.txt",
+  rg75a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/RG75A.TXT",
+  rg84a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg84a.txt",
+  rg89  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg89.txt",
+  rgw3  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw3.txt"
+)
+
+# Step 2: Function to read a single gauge
+
+read_rg <- function(url, station_name) {
+
+  df <- read.table(
+    url,
+    header = FALSE,
+    sep = "",
+    col.names = c("Station", "Month", "Day", "Year", "Precip_in"),
+    stringsAsFactors = FALSE
+  )
+
+  df %>%
+    mutate(
+      Station = station_name,
+      Date = as.Date(sprintf("%04d-%02d-%02d", Year, Month, Day))
+    ) %>%
+    select(Date, Station, Precip_in)
+}
+
+# Step 3: Read all gauges and stack
+
+all_long <- imap_dfr(urls, read_rg)
+
+# Step 4: Create a complete date × station grid
+
+full_dates <- seq(
+  min(all_long$Date, na.rm = TRUE),
+  max(all_long$Date, na.rm = TRUE),
+  by = "day"
+)
+
+complete_df <- expand_grid(
+  Date = full_dates,
+  Station = stations
+)
+
+# Step 5: Merge and reshape to wide format
+
+Subwatershed_Y_df <- complete_df %>%
+  left_join(all_long, by = c("Date", "Station")) %>%
+  pivot_wider(
+    names_from = Station,
+    values_from = Precip_in
+  ) %>%
+  arrange(Date)
+
+#Check: View(Subwatershed_Y_df)
+
+```
+
+This is the complete dataset for all the active raingauges in subwatershed Y. Let's do one more thing": we will keep the data post 2010 and make another column for precipitation in millimeters.
+
+```{r}
+
+# 1. Subset to post-2010 period
+
+Subwatershed_Y_df_post2010 <- Subwatershed_Y_df %>%
+  filter(Date >= as.Date("2011-01-01"))
+
+# 2. Add precipitation in millimeters
+
+Subwatershed_Y_df_post2010_mm <- Subwatershed_Y_df_post2010 %>%
+  # this is only to make sure all columns are numeric
+  mutate(
+    across(
+      -Date,
+      ~ map_dbl(.x, \(v) if (length(v) == 0) NA_real_ else v[1])
+    )
+  ) %>%
+  # convert it to millimeter (1 inch = 25.4 mm)
+  mutate(
+    across(
+      -Date,
+      ~ .x * 25.4,
+      .names = "{.col}_mm"
+    )
+  )
+
+#Check: View(Subwatershed_Y_df_post2010_mm)
+
+```
+
+We can now plot the time series of precipitation at each of these stations and see how they vary.
+
+```{r}
+
+# 1. Keep only Date + precipitation in mm
+
+precip_mm_df <- Subwatershed_Y_df_post2010_mm %>%
+  select(Date, ends_with("_mm"))
+
+# 2. Convert to long format for ggplot
+precip_mm_long <- precip_mm_df %>%
+  pivot_longer(
+    cols = -Date,
+    names_to = "Gauge",
+    values_to = "Precip_mm"
+  )
+
+# (Optional) Clean gauge names!
+precip_mm_long <- precip_mm_long %>%
+  mutate(Gauge = gsub("_mm$", "", Gauge))
+
+# 3. Stacked time-series plot (faceted)
+library(ggplot2)
+
+ggplot(precip_mm_long, aes(x = Date, y = Precip_mm)) +
+  geom_line(na.rm = TRUE) +
+  facet_wrap(~ Gauge, ncol = 1, scales = "free_y") +
+  labs(
+    x = "Date",
+    y = "Daily precipitation (mm)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    panel.spacing = unit(0.2, "lines")
+  )
+
+```
+
+**Q 1. What is the total (annual) precipitation for each site in year 2011, 2014, and 2017?**
+
+Let us now perform a simple experiment: we will compute the upscaled precipitation timersies for subwatershed Y using Thiessen wights for each of these rain gauge stations. In addition, we will also compute the arithmetic average, geometric average and harmonic average - which will also produce alternative representative values for upscaled precipitation. Finally we compare the results.
+
+```{r}
+
+# 1. Define Thiessen weights
+thiessen_weights <- c(
+  rg69  = 9.02,
+  rg69b = 12.61,
+  rg70  = 11.99,
+  rg75a = 21.88,
+  rg84a = 25.02,
+  rg89  = 16.81,
+  rgw3  = 2.67
+)
+
+# 2. Ensure numeric precipitation in long format (flatten list-columns if any)
+precip_mm_long <- precip_mm_long %>%
+  mutate(
+    Precip_mm = map_dbl(Precip_mm, \(v) if(length(v)==0) NA_real_ else v)
+  )
+
+# 3. Compute Thiessen-weighted precipitation per date
+library(matrixStats)  # optional, for row-wise geometric/harmonic
+
+precip_thiessen <- precip_mm_long %>%
+  group_by(Date) %>%
+  summarise(
+    # Extract vector of values and corresponding weights
+    vals = list(Precip_mm),
+    gauges = list(Gauge),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    Precip_Thiessen = {
+      v <- unlist(vals)
+      g <- unlist(gauges)
+      w <- thiessen_weights[g]
+      # Weighted sum / sum of available weights
+      sum(v * w, na.rm = TRUE) / sum(w[!is.na(v)])
+    },
+    Precip_Arithmetic = mean(unlist(vals), na.rm = TRUE),
+    Precip_Geometric = ifelse(all(is.na(unlist(vals))),
+                              NA_real_,
+                              exp(mean(log(pmax(unlist(vals), 1e-6)), na.rm = TRUE))),
+    Precip_Harmonic = ifelse(all(is.na(unlist(vals))),
+                             NA_real_,
+                             length(na.omit(unlist(vals))) /
+                               sum(1 / pmax(unlist(vals), 1e-6), na.rm = TRUE))
+  ) %>%
+  ungroup() %>%
+  select(Date, Precip_Thiessen, Precip_Arithmetic, Precip_Geometric, Precip_Harmonic)
+
+# 4. Inspect first few rows
+head(precip_thiessen)
+
+```
+
+Let us plot these upscaled time series values:
+
+```{r}
+
+# Create a temporary long version only for plotting
+precip_thiessen_long <- precip_thiessen %>%
+  pivot_longer(
+    cols = -Date,
+    names_to = "Method",
+    values_to = "Precip_mm"
+  )
+
+# Stacked time series plot
+ggplot(precip_thiessen_long, aes(x = Date, y = Precip_mm)) +
+  geom_line(color = "steelblue") +
+  facet_wrap(~Method, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Subwatershed Y: Daily Upscaled Precipitation (Stacked)",
+    x = "Date",
+    y = "Precipitation (mm)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.spacing = unit(0.2, "lines")
+  )
+
+```
+
+Visually, making out the differences is not easy in this case. So let us find summary (mean and standard deviation) based on each averaging scheme.
+
+```{r}
+
+# Pivot to long format for easier summary
+precip_summary <- precip_thiessen %>%
+  pivot_longer(
+    cols = -Date,
+    names_to = "Method",
+    values_to = "Precip_mm"
+  ) %>%
+  group_by(Method) %>%
+  summarise(
+    Mean = mean(Precip_mm, na.rm = TRUE),
+    SD   = sd(Precip_mm, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+precip_summary
+
+```
+
+**Q 2. What is the general pattern for mean and standard deviation of each averaging scheme? Why do you think this is the case?**
+
+**Q 3. Can you think of other summaries that can be derived from the upscaled time series to further understand the differences between all the upscaling/averaging schemes? Plot these new summaries that can show differences between the upsacling schemes**
+
+### Part 2: Working with spatial data
+
+We will now load the shapefile for the Riesel site. It is stored as  File Geodatabase (FGDB). More information can be accessed at: https://www.nrrig.mwa.ars.usda.gov/stewards/stewards.html
+
+
+```{r}
+
+library(sf)
+library(stringr)
+
+# 1. Path to the extracted File Geodatabase
+fgdb_path <- "D:/Downloads/TXRI_StewardsGIS.gdb"
+#Check: st_layers(fgdb_path)
+
+# 2. Read watershed boundary
+riesel_sf <- st_read(fgdb_path, layer = "TXRI_boundary")
+
+# 3. Read all rain gauge points
+rg_sf <- st_read(fgdb_path, layer = "TXRI_rain_gauges_riesel")
+#Check: rg_sf$SITE
+
+# 4. Define the stations of interest
+stations <- c("rg69", "rg69b", "rg70", "rg75a", "rg84a", "rg89", "rgw3")
+
+# 5. Filter rain gauges: match ignoring case and spaces
+rg_sf_filtered <- rg_sf %>%
+    filter(str_replace_all(tolower(SITE), " ", "") %in% stations)
+
+# 6. Plot watershed with filtered rain gauges
+ggplot() +
+    geom_sf(data = riesel_sf, fill = "lightblue", color = "black") +
+    geom_sf(data = rg_sf_filtered, color = "red", size = 3) +
+    geom_sf_text(data = rg_sf_filtered, aes(label = SITE), nudge_y = 50, size = 3) +
+    labs(title = "Riesel Watershed with Selected Rain Gauges") +
+    theme_bw()
+
+```
+
+**Q 4. From the spatial plot, do you think the spatial coverage from the selected rain gauges is sufficient to provide a good representation for the entire watershed? Why/why not? If you think we need more sites, which rain gauge stations we need to add? Provide their name and create a similar spatial plot as above with those new locations added with their names displayed.**
+
+**Q 5. Is it possible to install rain gauges in any random orientation within the watershed and calibrate them such that they give the same upscaled value for each orientation? Assuming you have all the information you want, on what basis would you optimize rain-gauge installation? (This question is not related to Riesel watershed but read the paper provided under reading suggestions to provide example of how the stations were installed at Riesel watershed.)**
+
+
+**Submission Guidelines**
+
+1.    All submissions are due in 1 week from the date of assignment, prior to the lab session/class. 
+
+2.    Please be to-the-point in your answers (if not asked to elaborate) and follow the principles of scientific reporting (formal, complete and meaningful sentences supplemented with numbers and reasoning wherever applicable). If large language models are used, pleas make it clear in your submissions on top of the first page (beginning of your assignment solutions).
+
+3.    Email your solutions to `debmishra@tamu.edu` as a *single PDF file* (unless other file types are needed to support your solutions). Please fashion the subject of the email and the name of the submitted document name as: *BAEN675_Assignment#[number]_[Last name]*.
+
+**Reading Suggestions**
+
+1.    USDA-ARS Riesel Watersheds, Riesel, Texas, USA: Water quality research database;  https://doi.org/10.1002/2013WR015191Digital Object Identifier (DOI)
