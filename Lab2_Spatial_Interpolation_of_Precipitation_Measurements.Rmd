@@ -1,0 +1,507 @@
+---
+title: "Lab 2 (BAEN 675) : Spatial Interpolation of Precipitation measurements"
+output: html_notebook
+---
+
+In the last lab, we learnt how to work to with ground observation precipitation time series dataset. 
+
+In this lab, we will begin from where we left in the last one. But first let us load in all the required libraries.
+
+```{r}
+
+# Required libraries
+
+library(sf)
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(spatstat.geom)
+library(tmap)
+library(gstat)
+library(ggplot2)
+library(nasapower) #Important
+
+```
+
+### 1. Working with Rain Gauge Data
+
+Now, let us read back the shapefile for Stiles farm that we downloaded in last class. Make sure to provide the path to the file location. 
+
+We will create the spatial plot of Riesel watershed and add few more rain gauges to make sure we cover the watershed. 
+
+More information about Riesel watershed can be accessed at: https://www.ars.usda.gov/plains-area/temple-tx/grassland-soil-and-water-research-laboratory/docs/hydrologic-data/ 
+
+```{r}
+
+# 1. Path to the extracted File Geodatabase
+fgdb_path <- "G:/Shared drives/VZRG_TAMU/Debasish/Class Materials/Hydrology Across Scales 2026/Lab/Lab 1 - Precipitation Upscaling/TXRI_StewardsGIS.gdb"
+
+#Check: st_layers(fgdb_path)
+
+# 2. Read watershed boundary
+riesel_sf <- st_read(fgdb_path, layer = "TXRI_boundary")[1,]
+
+# 3. Read all rain gauge points
+rg_sf <- st_read(fgdb_path, layer = "TXRI_rain_gauges_riesel")
+#Check: rg_sf$SITE
+
+# 4. Define the stations of interest (we have added few more rain gauge stations)
+stations <- c("rg69", "rg69b", "rg70", "rg75a", "rg84a", "rg89", "rgw3", "rgw6", "rgw4", "rgw9", "rgw5a", "rgw2a", "rgw1b")
+
+# 5. Filter rain gauges: match ignoring case and spaces
+rg_sf_filtered <- rg_sf %>%
+    filter(str_replace_all(tolower(SITE), " ", "") %in% stations)
+
+# 6. Plot watershed with filtered rain gauges
+ggplot() +
+    geom_sf(data = riesel_sf, fill = "lightblue", color = "black") +
+    geom_sf(data = rg_sf_filtered, color = "blue", size = 3) +
+  geom_sf_text(data = rg_sf_filtered, aes(label = SITE), nudge_y = 85, size = 3) +
+    labs(title = "Riesel Watershed with Selected Rain Gauges") +
+    theme_bw()
+
+
+```
+
+We will now go in the reverse direction - given that we have additional rain gauges, we will make sure to include precipitation of all the stations in one dataframe. We will follow the same logic as we did in the last lab session.
+
+```{r}
+
+#Step 1: Define stations and URLs
+
+stations <- c("rg69", "rg69b", "rg70", "rg75a", "rg84a", "rg89", "rgw3", "rgw6", "rgw4", "rgw9", "rgw5a", "rgw2a", "rgw1b")
+
+urls <- c(
+  rg69  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/RG69.TXT",
+  rg69b = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg69b.txt",
+  rg70  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg70.txt",
+  rg75a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/RG75A.TXT",
+  rg84a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg84a.txt",
+  rg89  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rg89.txt",
+  rgw3  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw3.txt",
+  rgw6  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw6.txt",
+  rgw4  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw3.txt",
+  rgw9  = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw9.txt",
+  rgw5a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw5a.txt",
+  rgw2a = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw2a.txt",
+  rgw1b = "https://www.ars.usda.gov/ARSUserFiles/30980500/riesel/rgw1b.txt"
+)
+
+# Step 2: Function to read a single gauge
+
+read_rg <- function(url, station_name) {
+
+  df <- read.table(
+    url,
+    header = FALSE,
+    sep = "",
+    col.names = c("Station", "Month", "Day", "Year", "Precip_in"),
+    stringsAsFactors = FALSE
+  )
+
+  df %>%
+    mutate(
+      Station = station_name,
+      Date = as.Date(sprintf("%04d-%02d-%02d", Year, Month, Day))
+    ) %>%
+    select(Date, Station, Precip_in)
+}
+
+# Step 3: Read all gauges and stack
+
+all_long <- imap_dfr(urls, read_rg)
+
+# Step 4: Create a complete date × station grid
+
+full_dates <- seq(
+  min(all_long$Date, na.rm = TRUE),
+  max(all_long$Date, na.rm = TRUE),
+  by = "day"
+)
+
+complete_df <- expand_grid(
+  Date = full_dates,
+  Station = stations
+)
+
+# Step 5: Merge, reshape to wide format and just keep values starting from year 2011
+
+Riesel_df <- complete_df %>%
+  left_join(all_long, by = c("Date", "Station")) %>%
+  pivot_wider(
+    names_from = Station,
+    values_from = Precip_in
+  ) %>%
+  arrange(Date) %>%
+  filter(Date >= as.Date("2011-01-01"))
+
+#Check: View(Riesel_df)
+
+# Add precipitation in millimeters
+
+Riesel_df_post2010 <- Riesel_df %>%
+  # this is only to make sure all columns are numeric
+  mutate(
+    across(
+      -Date,
+      ~ map_dbl(.x, \(v) if (length(v) == 0) NA_real_ else v[1])
+    )
+  ) %>%
+  # convert it to millimeter (1 inch = 25.4 mm)
+  mutate(
+    across(
+      -Date,
+      ~ .x * 25.4,
+      .names = "{.col}_mm"
+    )
+  )%>%
+  select(Date, ends_with("_mm"))
+
+#Check: View(Riesel_df_post2010)
+
+```
+
+### 2. Thiessen Polygon
+
+The Thiessen polygons (or proximity interpolation) can be created using spatstat’s `dirichlet` function. The Dirichlet tiles divide the two-dimensional plane into disjoint regions, forming a tessellation. The Dirichlet tessellation is also known as the Voronoi or Thiessen tessellation. 
+
+Note that this function will require that the input point layer be converted to a spatstat ppp object–hence the use of the inline as.ppp(P) syntax in the following code chunk. You can check out the help page for more details.
+
+
+```{r}
+
+# 1. Select a date to upscale
+
+interp_date <- as.Date("2011-01-04")
+
+
+# 2. Extract precipitation values for that date
+
+precip_day <- Riesel_df_post2010 %>%
+  filter(Date == interp_date) %>%
+  pivot_longer(
+    cols = -Date,
+    names_to = "station",
+    values_to = "precip_mm"
+  ) %>%
+  mutate(
+    station = str_remove(station, "_mm"),
+    station = tolower(station)
+  )
+
+
+# 3. Attach precipitation to rain-gauge locations (Thiessen polygons require station locations with values)
+
+rg_sf_interp <- rg_sf_filtered %>%
+  mutate(
+    station = str_replace_all(tolower(SITE), " ", "")
+  ) %>%
+  left_join(precip_day, by = "station") %>%
+  filter(!is.na(precip_mm))   # Thiessen requires values
+
+
+# 4. Convert rain gauges to spatstat point pattern (Thiessen polygons are Voronoi tessellations → handled by spatstat)
+
+# Define window as watershed boundary
+riesel_win <- as.owin(riesel_sf)
+
+pp <- as.ppp(
+  st_coordinates(rg_sf_interp),
+  W = riesel_win
+)
+
+
+# 5. Create Thiessen (Voronoi) polygons
+
+th_sfc <- dirichlet(pp) |> st_as_sfc()
+thiessen_sf <- st_sf(geometry = th_sfc)
+
+# Restore CRS
+st_crs(thiessen_sf) <- st_crs(rg_sf_interp)
+
+
+# 6. Assign precipitation values to polygons (each polygon inherits the value of its generating station)
+
+thiessen_sf <- bind_cols(
+  thiessen_sf,
+  st_drop_geometry(rg_sf_interp)
+)
+
+
+# 7. MASK to exact Stiles Farm boundary (this trims polygon edges to the watershed shape)
+
+thiessen_clipped <- st_intersection(thiessen_sf, riesel_sf)
+
+
+# 8. Plot Thiessen precipitation map 
+
+precip_breaks <- c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)  # mm
+
+blue_palette <- c(
+  "#f7fbff",
+  "#deebf7",
+  "#c6dbef",
+  "#9ecae1",
+  "#6baed6",
+  "#3182bd",
+  "#08519c"
+)
+
+ggplot() +
+  # Thiessen polygons
+  geom_sf(
+    data = thiessen_clipped,
+    aes(fill = precip_mm),
+    color = NA
+  ) +
+  
+  # Watershed boundary
+  geom_sf(
+    data = riesel_sf,
+    fill = NA,
+    color = "black",
+    linewidth = 0.6
+  ) +
+  
+  # Rain gauges
+  geom_sf(
+    data = rg_sf_interp,
+    color = "red",
+    size = 2
+  ) +
+  
+  # Fixed discrete blue scale
+  scale_fill_stepsn(
+    name     = "Precipitation (mm)",
+    breaks  = precip_breaks,
+    colours = blue_palette,
+    limits  = range(precip_breaks),
+    na.value = "transparent"
+  ) +
+  
+  labs(
+    title = "Thiessen (Voronoi) Precipitation",
+    subtitle = paste("Riesel / Stiles Farm –", interp_date)
+  ) +
+  
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.key.height = unit(0.6, "cm")
+  )
+```
+
+**Q 1. Repeat the same procedure for three other dates of your choice. Explain how Dirichlet tessellation works. How is it related to nearest-neighbor method?**  
+
+### 3. Inverse Distance Wighted Method
+
+The Inverse Distance Weighted (IDW) method is a deterministic interpolation technique that estimates values at unsampled locations using a weighted average of nearby known points. It assumes closer points are more similar than distant ones, assigning higher weights to closer data points. Weights are calculated as the inverse of the distance (or squared distance) to the power of a specified exponent, causing influence to decrease as distance increases.
+
+Let us now try to spatially interpolate the precipitation values.
+
+```{r}
+
+# 1. Select a date to upscale
+
+interp_date <- as.Date("2011-01-04")   
+
+
+# 2. Get precipitation at gauges for that date (convert the wide rainfall table into station–value pairs)
+
+precip_day <- Riesel_df_post2010 %>%
+  filter(Date == interp_date) %>%
+  pivot_longer(
+    cols = -Date,
+    names_to = "station",
+    values_to = "precip_mm"
+  ) %>%
+  mutate(
+    station = str_remove(station, "_mm"),
+    station = tolower(station)
+  )
+
+
+# 3. Attach precipitation values to gauge locations (IDW needs point locations with values)
+
+rg_sf_interp <- rg_sf_filtered %>%
+  mutate(
+    station = str_replace_all(tolower(SITE), " ", "")
+  ) %>%
+  left_join(precip_day, by = "station") %>%
+  filter(!is.na(precip_mm))   # zero rainfall kept, missing removed
+
+
+# 4. Create a grid covering the watershed (we interpolate onto grid cell centroids, then display as polygons)
+
+grid_poly <- st_make_grid(
+  riesel_sf,
+  cellsize = 100,    # meters
+  what = "polygons"
+)
+
+grid_sf <- st_sf(geometry = grid_poly)
+
+
+# 5. Perform IDW interpolation (Weights ∝ 1 / distance²)
+
+grid_centers <- st_centroid(grid_sf) #find the center point of each grid cell
+
+#Why this is needed: Interpolation methods like IDW predict values at points, not over areas. So instead of predicting for the whole grid cell, we predict at its center.
+
+#In simple terms: “Take every grid square and mark a dot at its middle.”
+
+idw_model <- gstat(
+  
+  formula = precip_mm ~ 1, 
+  # ~ 1 means no predictors, only spatial proximity is used
+  
+  locations = rg_sf_interp,
+  
+  nmax = 7,
+  # for each prediction point, the 7 nearest stations are used
+  
+  set = list(idp = 2)   # idp is the distance power
+)
+
+# Uses the IDW model to predict precipitation at each grid cell center
+idw_pred <- predict(idw_model, grid_centers)
+
+
+# 6. Attach interpolated values to grid polygons
+
+grid_sf$precip_idw <- idw_pred$var1.pred
+
+
+# 7. Mask interpolation to Stiles Farm boundary
+
+grid_masked <- st_intersection(grid_sf, riesel_sf)
+
+
+# 8. Plot IDW precipitation map
+
+precip_breaks <- c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)  # mm
+
+blue_palette <- c(
+    "#f7fbff",
+    "#deebf7",
+    "#c6dbef",
+    "#9ecae1",
+    "#6baed6",
+    "#3182bd",
+    "#08519c"
+)
+
+
+ggplot() +
+    geom_sf(
+        data = grid_masked,
+        aes(fill = precip_idw),
+        color = NA
+    ) +
+    geom_sf(
+        data = riesel_sf,
+        fill = NA,
+        color = "black",
+        linewidth = 0.6
+    ) +
+    geom_sf(
+        data = rg_sf_interp,
+        color = "red",
+        size = 2
+    ) +
+    scale_fill_stepsn(
+        colors = blue_palette,
+        breaks = precip_breaks,
+        limits = range(precip_breaks),
+        name = "Precipitation (mm)",
+        na.value = "transparent"
+    ) +
+    labs(
+        title = "IDW Interpolated Precipitation (Masked to Stiles Farm)",
+        subtitle = paste("Riesel Watershed –", interp_date)
+    ) +
+    theme_bw() +
+    theme(
+        legend.key.height = unit(0.6, "cm"),
+        legend.key.width  = unit(0.4, "cm")
+    )
+
+
+```
+
+**Q2. Use powers of 1, 2, and 3 and provide a comparison of outputs. You can think of various methods to provide comparison - one of which is to take the difference of two spatial maps and discussing the differences.**
+
+**Q3. Perform  leave-one-out validation to measure the error in the interpolated values for different powers. Specify the rmse (root mean square error) values you get for each power exponent. Based on these findings, which exponent will you consider to provide better approximation while upscaling? **
+
+**Q4. Which method (Thiessen polygon versus IDW) is a better upscaling scheme? Why? Justify with scientific reasons.**
+
+### 4. Downloading reanalysis precipitation data
+
+NASA’s MERRA-2 (Modern-Era Retrospective analysis for Research and Applications, Version 2) provides high-resolution global precipitation data from 1980 to the present. It is a "reanalysis" product, meaning it blends atmospheric models with satellite and ground-based observations to create a consistent global record.
+
+MERRA-2 offers two primary types of precipitation variables, each suited for different research needs: 
+  1. PRECTOTCORR (Corrected): This is the recommended product for land surface studies. It uses ground-based gauge observations (from NOAA CPC) to bias-correct the model's precipitation, significantly improving accuracy for hydrological modeling.
+
+  2. PRECTOT (Model-only): This variable is generated entirely by the GEOS model without external gauge correction. It is useful for understanding the model's internal physics but often overestimates rainfall in certain regions.
+  
+Spatial Resolution of the products: Approximately 50 km (0.625° longitude × 0.5° latitude).
+
+More information about the product can be found at: https://climatedataguide.ucar.edu/climate-data/nasas-merra2-reanalysis 
+
+For this we will use the `nasapower` package that makes it easy to automate downloading NASA POWER (NASA Prediction of Worldwide Energy Resource) global meteorology, surface solar energy and climatology data. We will use it fetch precipitation data from MERRA-2 "PRECTOTCORR" Precipitation product (in mm/day).
+
+More information about the package is available at: https://rspatialdata.github.io/rainfall.html
+
+```{r}
+
+# 1. Convert watershed to lon–lat
+
+riesel_ll <- st_transform(riesel_sf, 4326)
+
+
+# 2. Get watershed centroid (NASA POWER DAILY requires a POINT)
+
+riesel_centroid <- st_centroid(riesel_ll)
+coords <- st_coordinates(riesel_centroid)
+
+lonlat_point <- c(coords[1], coords[2])
+
+
+# 3. Date of interest
+
+interp_date <- as.Date("2011-01-04")
+
+
+# 4. Fetch DAILY precipitation from NASA POWER (POINT query)
+
+precip_value <- get_power(
+  community = "AG",        #agricultural parameters
+  pars = "PRECTOTCORR",    #precipitation (corrected)
+  lonlat = lonlat_point,   #the centroid point of the watershed
+  dates = interp_date,     #the day we want
+  temporal_api = "DAILY"   #get daily data
+)
+
+
+# 5. Inspect result
+
+precip_value
+
+```
+
+The value from MERRA-2 for Riesel watershed on 2011-01-04 is 0.51 mm/day. 
+
+**Q5. Is this a good estimate for the entire watershed? Compare it with mean (arithmetic, geometric and harmonic) values based on the Thiessen polygon and IDW methods you had used earlier for this date.** 
+
+**Submission Guidelines**
+
+1.    All submissions are due in 1 week from the date of assignment, prior to the lab session/class. 
+
+2.    Please be to-the-point in your answers (if not asked to elaborate) and follow the principles of scientific reporting (formal, complete and meaningful sentences supplemented with numbers and reasoning wherever applicable). If large language models are used, pleas make it clear in your submissions on top of the first page (beginning of your assignment solutions).
+
+3.    Email your solutions to `debmishra@tamu.edu` as a *single PDF file* (unless other file types are needed to support your solutions). Please fashion the subject of the email and the name of the submitted document name as: *BAEN675_Assignment#[number]_[Last name]*.
+
+**Reading Suggestions**
+
+1.    A Review of Global Precipitation Data Sets: Data Sources, Estimation, and Intercomparisons; https://doi.org/10.1002/2017RG000574
