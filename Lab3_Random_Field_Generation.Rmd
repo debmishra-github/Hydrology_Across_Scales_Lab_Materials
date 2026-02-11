@@ -1,0 +1,181 @@
+---
+title: "Lab 3 (BAEN 675): Random Field Generation"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+**1. Introduction**
+
+Geostatistical data provide information of a spatially continuous phenomenon that has been measured at particular sites. This type of data may represent, for example, precipitation datasets taken at a set of monitoring stations, or soil moisture data collected using moisture probes inside a field. Due to these reasons, the use of multi-dimensional random fields to model real soils is becoming ever more important, simply because soils are spatially random. In this lab session, we will understand what exactly a random field is, and how we can generate such fields in R.
+
+However, before proceeding, let's install and load in the necessary libraries.
+
+```{r}
+
+#Load necessary libraries
+
+library(geoR)
+library(ggplot2)
+library(sf)
+
+```
+
+**2. Random Field**
+
+A *random field* is a random function over an arbitrary domain. That is, it is a function that takes on a random value at each point. More formally, Let $Z(s_1), Z(s_2), ..., Z(s_n)$ be observations of a spatial variable Z at locations $s_1, s_2, ..., s_n$. The geostatistical data may thus be assumed to be a partial realization of a random process
+
+$$
+{Z(s):s \in D \subset R^{2}}
+$$
+
+where the spatial index $s$ varies continuously throughout $D$. Often, for practical reasons, the process Z(.) can only be observed at a finite set of locations. Based upon this partial realization, we may seek to infer the characteristics of the spatial process that gives rise to the data observed such as the mean and variability of the process. Then, we can use this information to predict the process at unsampled locations and construct a spatially continuous surface of the variable of study. Some of the widely used spatial interpolation methods include inverse distance weighted method, Kriging and model-based geostatistics.
+
+**2.1 Gaussian Random Field**
+
+A Gaussian random field (GRF) ${Z(s):s \in D \subset R^{2}}$ is a collection of random variables where observations occur in a continuous domain, and where every finite collection of random variables has a *multivariate normal* distribution. A random process Z(.) is said to be strictly *stationary* if it is invariant to shifts. That is, if for any set of locations $s_i, i=1,...,n,$ and any $h \in R^{2}$, the distribution of $Z(s_1), ..., Z(s_n)$ is the same as $Z(s_1 + h), ..., Z(s_n + h)$. A less restrictive condition is given by the second-order stationarity (or weakly stationarity). Under this condition, the process has constant mean,
+
+$$
+{E[Z(s)]= \mu, \forall s \in D}
+$$
+
+and the covariances depend only on the differences between locations,
+
+$$
+{Cov(Z(s), Z(s+h))= C(h), \forall s \in D, \forall h \in R^{2}}
+$$
+
+In addition, if the covariances are functions only of the distances between locations $h=||h||$ and not of the directions, the process is called *isotropic*. If not, it is *anisotropic*.
+
+Note that, given a *stationary* and *isotropic* Gaussian random process 
+$Z(.)$, the covariance function between a pair of variables separated by a distance $h$ can be expressed as
+
+$$
+{C(h)= \sigma^{2}Corr(h)}
+$$
+where $\sigma^{2}$ denotes the variance of the spatial field, $Corr(h)$ and is a positive definite correlation function.
+
+**3. Simulating Gaussian random fields**
+
+Here, we show how to generate realizations of several Gaussian random fields using the *geoR* package. The *cov.spatial()* function of geoR computes the value of the covariance function $C(h)= \sigma^{2}Corr(h)$ between a pair of variables located at points separated by distance $h$. The types of covariance functions implemented in geoR can be seen by typing *?cov.spatial*.
+
+```{r}
+?cov.spatial
+
+```
+
+Here, we show the correlation functions and realizations of Gaussian random fields with *Matérn* covariance function,
+
+$$
+{C(h)= \frac{\sigma^{2}}{2^{\nu-1} \Gamma(\nu)} (\frac{h}{\phi})^\nu K_\nu(\frac{h}{\phi}) }
+$$
+
+where $h$ denotes the distance between locations, parameter $\nu$ determines the smoothness of the process, and $K_\nu(.)$ is the modified Bessel function of second kind and order $\nu>0$. The paramter $\phi>0$ controls how fast the correlation decays with distance and is related to the *range*, he distance at which the correlation between two points is approximately 0.
+
+Please note that the *Matérn family* represents a very flexible class of correlation functions that appears naturally in many scientific fields. And under special conditions, it gives rise to exponential correlation function {$\nu \to 0.5$} and Gaussian correlation function {$\nu \to \inf$}. 
+
+The `grf()` function of geoR can be used to simulate realizations of a Gaussian random field by specifying the following arguments:
+
+*   `n` is the number of points in the simulation. Here, we choose 1024 to simulate in a grid with 32 × 32 cells.
+
+*   `grid` can be set to "reg" to simulate in a regular grid or "irreg" to simulate in a number of coordinates.
+
+*   `xlims` and `ylims` specify the limits of the area in the x and y directions, respectively. Here, we generate the field in a squared region [0,1]x[0,1] by using the default values xlims = c(0, 1) and ylims = c(0, 1).
+
+*   `cov.model` denotes the type of correlation function (e.g., "matern"). Possible types are detailed in the cov.spatial() function.
+
+*   `cov.pars` specifies the covariance parameters that indicate the variance $\sigma^2$ and the parameter related to the range $\phi$.
+
+*   `kappa` is the smoothness parameter required by some correlation functions such as "matern". By default, `kappa` = 0.5. In particular, kappa represents $\nu$ in the definition of the Matérn function above.
+
+
+```{r message=FALSE, warning=FALSE}
+
+#We will use "Matern" Covariance function/model
+covmodel <- "matern"
+
+#Let's take variance as 1.
+sigma2 <- 1
+
+# Plot covariance function
+curve(cov.spatial(x, 
+                  cov.pars = c(sigma2, 1),
+                  cov.model = covmodel), 
+      lty = 1,
+      from = 0, to = 1, 
+      ylim = c(0, 1), 
+      main = "Matérn",
+      xlab = "distance", ylab = "Covariance(distance)")
+
+curve(cov.spatial(x, 
+                  cov.pars = c(sigma2, 0.2),
+                  cov.model = covmodel), 
+      lty = 2, 
+      add = TRUE)
+
+curve(cov.spatial(x, 
+                  cov.pars = c(sigma2, 0.01),
+                  cov.model = covmodel), 
+      lty = 3, 
+      add = TRUE)
+
+legend(cex = 1.5, 
+       "topright", 
+       lty = c(1, 1, 2, 3),
+       col = c("white", "black", "black", "black"),
+       lwd = 2, bty = "n", inset = .01,
+       c(expression(paste(sigma^2, " = 1 ")),
+         expression(paste(phi, " = 1")),
+         expression(paste(phi, " = 0.2")),
+         expression(paste(phi, " = 0.01"))))
+
+# Simulate Gaussian random field in a regular grid 32 X 32
+sim1 <- grf(1024, 
+            grid = "reg",
+            cov.model = covmodel, 
+            cov.pars = c(sigma2, #variance paramter
+                         1))     #range paramater
+sim2 <- grf(1024, 
+            grid = "reg",
+            cov.model = covmodel,
+            cov.pars = c(sigma2, 0.2))
+sim3 <- grf(1024, 
+            grid = "reg",
+            cov.model = covmodel, 
+            cov.pars = c(sigma2, 0.01))
+
+# Plot Gaussian random field
+par(mfrow = c(1, 3), mar = c(2, 2, 2, 0.2))
+image(sim1, main = expression(paste(phi, " = 1")), cex.main = 2,
+      col = gray(seq(1, 0.1, l = 30)), xlab = "", ylab = "")
+image(sim2, main = expression(paste(phi, " = 0.2")), cex.main = 2,
+      col = gray(seq(1, 0.1, l = 30)), xlab = "", ylab = "")
+image(sim3, main = expression(paste(phi, " = 0.01")), cex.main=2,
+      col = gray(seq(1, 0.1, l = 30)), xlab = "", ylab = "")
+
+```
+
+**4. Assignment**
+
+1.    By substituting the appropriate value for $\nu$ in "Matern" covariance function, derive the expressions for "Gaussian" and "Exponential" covariance functions. *(20 points)*
+
+2.    Construct the covariance plots for "Gaussian" and "Exponential" models for correlation decays (range parameter) of 1, 0.1, 0.01. Comment on the differences between the models. Can you relate that with the expressions you derived for each of the models? *(20 points)*
+
+3.    Imagine that you were tasked by your manager to find out the best covariance model (between Gaussian and Exponential) for fitting your variable of interest (let's say soil moisture) for two different field sites - one with predominant clay loam texture, while another with sandy soil. Where do you think one model should be preferred over other? *(Hint: Think about the smoothing parameter, $\nu$)* *(20 points)*
+
+4.    Simulate and plot the Gaussian random fields for the above constructed models. What differences do you observe? *(20 points)* 
+
+5.    Try `plot(variog(...))` where ... refers to the generated random field object. What do you think the plot shows? What parameters should be altered for reproducing a plot similar to one shown below? (*Hint: Explore the random field objects*). *(20 points)*
+
+Figure: A Typical semivariogram plot used for summarizing a spatial Gaussian random field. (More on this in next assignment!)
+
+![Figure 2](Typical Semivariogram.png) 
+
+
+**Submission Guidelines**
+
+1.    All submissions are due in 1 week from the date of assignment, prior to the lab session/class. 
+
+2.    Please be to-the-point in your answers (if not asked to elaborate) and follow the principles of scientific reporting (formal, complete and meaningful sentences supplemented with numbers and reasoning wherever applicable). If large language models are used, pleas make it clear in your submissions on top of the first page (beginning of your assignment solutions).
+
+3.    Email your solutions to `debmishra@tamu.edu` as a *single PDF file* (unless other file types are needed to support your solutions). Please fashion the subject of the email and the name of the submitted document name as: *BAEN675_Assignment#[number]_[Last name]*.
