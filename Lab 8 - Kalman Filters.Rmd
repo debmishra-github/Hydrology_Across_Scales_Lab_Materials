@@ -1,0 +1,265 @@
+---
+title: "Lab 8 - Kalman Filter"
+output: html_notebook
+---
+### **1. Introduction**
+
+The Kalman filter is a linear state-space model that operates recursively on streams of noisy input data to produce a statistically optimal estimate of the underlying system state. The crux of the Kalman Filter is to estimate the value of some ‘unknown state’ based on some observed data. 
+
+But before proceeding, let's load in the required libraries.
+
+```{r}
+
+#Load necessary libraries
+library(ggplot2)
+library(lubridate)
+library(dplyr)
+library(stringr)
+library(scico)
+library(caret)
+library(sf)
+library(terra)
+library(spData)
+# library(spDataLarge)
+library(kalmanfilter)
+library(FKF)
+
+```
+
+### **2. The State Space Model**
+
+We began to introduce what a Kalman filter is above: a tool that estimates an unknown state based on observed data (so that our estimation is a combination of this observed data and a prediction).
+
+![Figure 1](Kalman Filter.png)
+
+One intuitive example is estimating the location of a satellite orbiting Earth. We take the ‘unknown state’ to be the true, exact position of the satellite, which we are trying to estimate from the ground. First, we have a ‘prediction step’: we make a prediction about where the satellite will be in the future based on where it was launched and using knowledge about gravity, the Earth’s rotation, etc. Second, we have a ‘measurement step’: we have a sensor on the satellite that beams us back information about the satellite’s location (the information isn’t exactly perfect; if it was, we wouldn’t need to estimate the satellite’s location in the first place!), and we use this measurement to update our estimate of where the satellite truly is (again, it’s only an estimate because both our measurement and our prediction are noisy).
+
+This is some simple intuition, but opens up a world of complexity: the unknown state, prediction and measurement can all have multiple dimensions (depending on the structure of the problem; what if, for example, we wanted the location of two satellites?). We can use Kalman Filters to rigorously define a useful approach to making these estimates.
+
+As we will see, Kalman Filters assume Gaussian (Normally distributed) inputs. One convenient result of this is that Gaussian predictions, combined with Gaussian measurements, give Gaussian estimates. This links nicely into the next step of the Kalman Filter; if we make a Gaussian estimate at time t, we can feed that Gaussian estimate into the Kalman Filter to get another Gaussian estimate at time t+1, and so on.
+
+#### **2.1 Deriving the Kalman Filter**
+
+Let’s denote the ‘unknown state’ (from above, the location of the satellite) as $\theta_{t}$, and the data that we observe (from above, the information beamed back from the satellite) as $Y_{t}$. Note that $\theta_{t}$ and $Y_{t}$ are stochastic processes; they are random variables that we observe over time! Also note that $\theta_{t}$ and $Y_{t}$ can be scalars (just a single number) or vectors (remember, we can construct a complicated problem with many dimensions) and that their dimensions are independent ($\theta_{t}$ could be a vector while $Y_{t}$ is a scalar). 
+
+Let's start with the definition of the unobserved state $\theta_{t}$:
+
+$$
+\theta_{t} = G_{t} \theta_{t-1} + w_{t}
+$$
+
+where $G_{t}$ is some known quantity (more on this soon) and $w_{t}$ is some Gaussian random variable centered at $0$ with a known variance (specifically, $w_{t} \sim N(0, \sigma_{w_{t}}^{2}$ for some known variance $\sigma_{w_{t}}^{2}$). Note that this is the equation for $\theta_{t}$ for $t = 1,2,...,$ as we just let $\theta_{0}$ equal some constant. The intuition here is that the $t^{th}$ value in the stochastic process $\theta_{t}$ is just $\theta_{t-1}$ times $G_{t}$ (a ‘transformation’ scalar or vector) plus some noise $w_{t}$.
+
+Let us now define $Y_{t}$, the data that we observe, in a similar fashion:
+
+$$
+Y_{t} = F_{t} \theta_{t} + v_{t}
+$$
+
+where $F_{t}$ is some known quantity and $v_{t}$ is some Gaussian random variable centered at $0$ with a known variance (specifically, $v_{t} \sim N(0, \sigma_{v_{t}}^{2}$ for some known variance $\sigma_{v_{t}}^{2}$).
+
+The intuition here is similar: we have some ‘true, unobserved state of nature’ $\theta_{t}$ which we multiply by some quantity  $F_{t}$ (again, ‘transformation’ scalar or matrix) and add on some random noise $v_{t}$ to get back to the data we actually observe $Y_{t}$.s
+
+Let’s use a simple dataset: the ‘Average Yearly Temperatures in New Haven,’ which is available as `nhtemp` in R:
+
+```{r}
+# print data
+nhtemp
+
+# visualize
+data <- data.frame(x = seq(from = 1912, to = 1971, by = 1),
+                   y = as.numeric(nhtemp))
+ggplot(data, aes(x = x, y = y)) +
+  geom_line() +
+  xlab("year") + xlab("temperature") +
+  ggtitle("Measured Yearly Average Temperature in New Haven") +
+  theme_bw()
+
+```
+So, this dataset simply gives what the average temp for the year was from 1912 to 1971. Let’s think of this phenomenon with a Kalman Filter paradigm: the unknown state we are trying to observe is the true average yearly temperature in New Haven. This dataset provides us with our measurements of the temperature; since these measurements may be noisy, we will use the Kalman Filter to try to enhance our estimate.
+
+We can set up our simple Kalman Filter model that we established in Equations 1 and 2:
+
+
+$$
+\theta_{t} = \theta_{t-1} + w_{t}
+$$
+
+and
+
+$$
+Y_{t} = \theta_{t} + v_{t}
+$$
+
+We will refer to these as the transition and measurement equations, respectively. Notice here that, for simplicity, we have $G_{t} = F_{t} = 1$ (we won’t have to worry about those constants!). 
+
+Again, we can think of $\theta_{t}$ as the true yearly temperature in year $t$, which moves through time as we add the random noise $v_{t}$ at each period. We can think of $Y_{t}$ as the measurement of the yearly temperature that is reported in our dataset in each period (again, note that the measurement is noisy!).
+
+Let’s now turn to the `FKF` package (specifically, the `fkf` function) to try to run a `Kalman filter`. Let’s start by matching up our variables in R.
+
+```{r}
+y <- nhtemp
+a0 <- y[1]
+P0 <- matrix(1)
+
+```
+
+Naturally, $y$, our data, is coming from `nhtemp`. Following the `fkf` documentation (which you can read by typing ?fkf), we let $a_{0}$ be our initial guess for $\theta$; a natural choice is just the temperature in the first period $y[1]$. We let $P_{0}$ be our best guess for the variance of $\theta$; we use 1 here, which is close to the sample variance ($var(y)$ gives 1.6) and is a nice round number.
+
+We now define our next set of parameters:
+
+```{r}
+dt <- ct <- matrix(0)
+```
+
+According to the documentation of the `fkf` function, these parameters give the ‘intercepts’ of the transition and measurement equations, respectively. The idea here is that we can extend our Kalman equations to add a constant that varies with time (i.e., $\theta_{t} = \theta_{t-1} + d_{t} + v_{t}$, where $d_{t}$ is a time-varying constant) in more complicated cases. For example, if we were working with monthly average temperatures, we might want to add a time-varying constant to adjust for seasonality; however, we don’t have this sort of construction in the problem at hand (temperatures are yearly), so we simply set these variables to $0$.
+
+Next we set our $F_{t}$ and $G_{t}$ values:
+```{r}
+Zt <- Tt <- matrix(1)
+```
+
+These are labeled in the fkf documentation as the ‘factors’ of the transition and measurement equations, which are $F_{t}$ and $G_{t}$ in our parlance. We defined these to be $1$ earlier on, so we simply set them to $1$ here.
+
+Finally, we have to set parameters `HHt` and `GGt`, which give the variance of the transition and measurement equations, or $\sigma_{v_{t}}^{2}$ and $\sigma_{w_{t}}^{2}$ in our parlance. If we peek at the documentation in the `fkf` function, we see that these variances are estimated by maximizing the log-likelihood of the Kalman Filter (search for fit.fkf). We can borrow this approach here:
+
+```{r}
+# Estimate parameters:
+fit.fkf <- optim(c(HHt = var(y, na.rm = TRUE) * .5,
+                   GGt = var(y, na.rm = TRUE) * .5),
+                 fn = function(par, ...)
+                 -fkf(HHt = matrix(par[1]), GGt = matrix(par[2]), ...)$logLik,
+                 yt = rbind(y), a0 = a0, P0 = P0, dt = dt, ct = ct,
+                 Zt = Zt, Tt = Tt)
+
+
+# recover values
+HHt <- as.numeric(fit.fkf$par[1])
+GGt <- as.numeric(fit.fkf$par[2])
+HHt; GGt
+```
+
+This essentially just initializes the optimizer search for `HHt` and `GGt` at half of the variance of the data y (this is the $var(y, na.rm = TRUE) * .5)$ and searches for the values of `HHt` and `GGt` that maximizes the log likelihood (using all of the other pre-defined parameters).
+
+Finally, then, our parameters are set, and we can run our Kalman Filter:
+
+```{r}
+y_fkf <- fkf(a0, P0, dt, ct, Tt, Zt,
+             HHt = matrix(HHt), GGt = matrix(GGt),
+             yt = rbind(y))
+```
+
+From the documentation of fkf, we have that `y_fkf$att` is the filtered state variables (our guess for $\theta_{t}$, the true temperature, given the data $Y_{t}$ that we observe) and `y_fkf$at` is the predicted state variables (our guess for $\theta_{t+1}$ given the data $Y_{t}$ that we observe). We are interested here in the filtered variable, so we can plot it:
+
+```{r}
+data <- data.frame(x = seq(from = 1912, to = 1971, by = 1),
+                   y = as.numeric(nhtemp),
+                   y_kalman = as.numeric(y_fkf$att),
+                   KG = as.numeric(y_fkf$Kt)) #kalman gain
+
+
+ggplot(data, aes(x = x, y = y)) +
+  geom_line() +
+  geom_line(data = data, aes(x = x, y = y_kalman), col = "blue") +
+  xlab("year") + xlab("temperature") +
+  ggtitle("Measured Yearly Average Temperature in New Haven (with Kalman Filter)") +
+  theme_bw()
+
+# Plot the Kalman gain using ggplot2
+ggplot(data, aes(x = x, y = KG)) +
+  geom_line(color = "blue") +
+  labs(x = "Year", y = "Kalman Gain", title = "Kalman Gain over Time")+
+  theme_bw()
+
+```
+The blue line is the estimate for what the true temperature, while the black lines are the (potentially noisy) measurements that we observe.
+
+### **3. Downscaling Soil Moisture Values**
+
+Let's try working out with the soil moisture dataset, which contains soil moisture time series for satellite and insitu measurement for TAMU Farm (TFPR) for the year of 2019.
+
+```{r}
+sm_ts<- read.csv("G:/Shared drives/VZRG_TAMU/Debasish/Class Materials/Hydrology Across Scales 2026/Lab/Lab 8 - Data Assimilation/Soil_Moisture_Timeseries.csv")[,-1]
+
+head(sm_ts)
+
+```
+
+
+```{r}
+
+#Data from Satellite SM
+y <- sm_ts$SM_sat
+#Initial guess of insitu SM
+a0 <- sm_ts$SM_gr[1]
+#Variance in insitu SM
+P0 <- matrix(var(sm_ts$SM_gr))
+
+#Intercepts of transition and measurement equations
+dt <- ct <- matrix(0)
+
+#Factors of transition and measurement equations
+Zt <- Tt <- matrix(1)
+
+# Estimate parameters:
+fit.fkf <- optim(c(HHt = var(sm_ts$SM_gr, na.rm = TRUE) * .5,
+                   GGt = var(y, na.rm = TRUE) * .5),
+                 fn = function(par, ...)
+                 -fkf(HHt = matrix(par[1]), GGt = matrix(par[2]), ...)$logLik,
+                 yt = rbind(y), a0 = a0, P0 = P0, dt = dt, ct = ct,
+                 Zt = Zt, Tt = Tt)
+
+
+# recover values
+HHt <- as.numeric(fit.fkf$par[1])
+GGt <- as.numeric(fit.fkf$par[2])
+HHt; GGt
+
+y_fkf <- fkf(a0, P0, dt, ct, Tt, Zt,
+             HHt = matrix(HHt), GGt = matrix(GGt),
+             yt = rbind(y))
+
+data <- data.frame(x = sm_ts$DOY,
+                   Obs = as.numeric(sm_ts$SM_gr),
+                   y_kalman = as.numeric(y_fkf$att),
+                   Sat = as.numeric(sm_ts$SM_sat),
+                   KG = as.numeric(y_fkf$Kt))
+
+#Time Series
+ggplot(data, aes(x = x, y = Obs)) +
+  geom_line() +
+  geom_line(data = data, aes(x = x, y = y_kalman), col = "blue") +
+  geom_line(data = data, aes(x = x, y = Sat), col = "black") +
+  xlab("year") + xlab("temperature") +
+  ggtitle("Soil Moisture in TFPR (with Kalman Filter)") +
+  theme_bw()
+
+#Kalman Gain
+ggplot(data, aes(x = x, y = KG)) +
+  geom_line(color = "blue") +
+  labs(x = "DOY", y = "Kalman Gain", title = "Kalman Gain over Time")+
+  theme_bw()
+
+
+```
+
+###  **4. Assignment**
+
+1.    Perform Kalman Filtering for soil moisture values (both satellite and insitu) for Danciger forest (DAFO) site for the year 2019. Use the lat-long values provided in `Site_locations_elevations.csv` file. (40 points) 
+
+2.    What should be a good value of "increment" in this example to tradeoff the parameter estimation and computational burden? Comment on the reliability of the estimated parameters. Use any information in the assignment (performance evolution, kamlan gain, benchmark models etc.) to substantiate your comments.   (30 points) 
+
+3.    Discuss briefly some popular variants of kalman filters and their applications. (30 points) 
+
+
+### **5. Submission Guidelines**
+
+1.    All submissions are due in 1 week from the date of assignment, prior to the lab session/class. 
+
+2.    Please be to-the-point in your answers and follow the principles of scientific reporting (formal, complete and meaningful sentences supplemented with numbers and reasoning wherever applicable.
+
+3.    Email your solutions to `debmishra@tamu.edu` as a single PDF file. Please fashion the subject of the email and the name of the submitted document name as: BAEN675_Assignment#[number]_[Last name].
+
+### **6. References**
+
+1.    https://bookdown.org/probability/bookdown-demo/kalman-filters.html
